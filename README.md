@@ -20,8 +20,11 @@ node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
 # локальный файл
 node client.mjs node ./my-server.mjs
 
-# python
+# python case 1
 node client.mjs python my_server.py
+
+# python case 2
+node client.mjs uv run --directory ./path/to/server-folder mcp-server
 
 # uvx (uv)
 node client.mjs uvx mcp-server-git --repository /tmp/repo
@@ -97,3 +100,29 @@ mcp> tools --schema
 # Хочешь увидеть сырой JSON-RPC который летит по протоколу:
 mcp> raw tools/list
 ```
+
+## Зависимости по типу сервера
+
+Наш клиент универсальный — он просто запускает процесс и общается через pipe.
+Но сам MCP сервер может быть написан на чём угодно, и нужный рантайм должен быть установлен.
+
+| Сервер | Что нужно | Установка (macOS) |
+|--------|-----------|-------------------|
+| Node.js пакет | Node.js | `brew install node` |
+| Python пакет | uv | `brew install uv` |
+| Бинарник | ничего | — |
+
+### uv — менеджер пакетов для Python
+
+`uv` это аналог `npm` для Python. Одной командой заменяет `pip` + `virtualenv` + `pyenv`.
+
+```bash
+# установка
+brew install uv
+
+# запуск Python MCP сервера через uv (аналог npx для npm)
+node client.mjs uv run --directory ./path/to/server server-entrypoint
+```
+
+При первом запуске uv сам создаст `.venv` в папке сервера и установит зависимости из `pyproject.toml`.
+Повторные запуски — мгновенные, зависимости уже на месте.
