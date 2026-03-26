@@ -4,45 +4,74 @@
  * MCP Explorer — универсальный интерактивный клиент
  *
  * Запуск:
- *   node client.mjs <команда запуска сервера...>
+ *   node client.mjs [-e KEY=VALUE ...] <команда запуска сервера...>
  *
  * Примеры:
  *   node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
  *   node client.mjs node ./my-server.mjs
- *   node client.mjs python my_server.py
- *   node client.mjs uvx mcp-server-git --repository /tmp/repo
+ *   node client.mjs uv run --directory ./plugins/cq/server cq-mcp-server
+ *   node client.mjs -e CQ_TEAM_ADDR=http://localhost:8742 -e CQ_TEAM_API_KEY=secret \
+ *     uv run --directory ./plugins/cq/server cq-mcp-server
  */
 
 import { spawn } from "child_process";
 import * as readline from "readline";
 
-// ─── Парсим команду из аргументов ────────────────────────────────────────────
+// ─── Парсим аргументы: сначала -e KEY=VALUE, потом команда ──────────────────
 
-const args = process.argv.slice(2);
+const rawArgs = process.argv.slice(2);
 
-if (args.length === 0) {
+if (rawArgs.length === 0) {
   console.error(`
 Использование:
-  node client.mjs <команда запуска mcp сервера...>
+  node client.mjs [-e KEY=VALUE ...] <команда запуска mcp сервера...>
 
 Примеры:
   node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
   node client.mjs node ./my-server.mjs
-  node client.mjs python my_server.py
-  node client.mjs uvx mcp-server-git --repository /tmp/repo
+  node client.mjs uv run --directory ./plugins/cq/server cq-mcp-server
+  node client.mjs -e CQ_TEAM_ADDR=http://localhost:8742 -e CQ_TEAM_API_KEY=secret \\
+    uv run --directory ./plugins/cq/server cq-mcp-server
 `);
   process.exit(1);
 }
 
-const [cmd, ...cmdArgs] = args;
+// Вытаскиваем -e KEY=VALUE пары из начала аргументов
+const extraEnv = {};
+let i = 0;
+while (i < rawArgs.length && rawArgs[i] === "-e") {
+  const pair = rawArgs[i + 1];
+  if (!pair || !pair.includes("=")) {
+    console.error(`Неверный формат env переменной: -e ${pair ?? ""}\nОжидается: -e KEY=VALUE`);
+    process.exit(1);
+  }
+  const eqIdx = pair.indexOf("=");
+  const key = pair.slice(0, eqIdx);
+  const val = pair.slice(eqIdx + 1);
+  extraEnv[key] = val;
+  i += 2;
+}
+
+const cmdArgs_all = rawArgs.slice(i);
+if (cmdArgs_all.length === 0) {
+  console.error("Укажи команду запуска MCP сервера после флагов -e");
+  process.exit(1);
+}
+
+const [cmd, ...cmdArgs] = cmdArgs_all;
 
 console.log(`\n🚀 Запускаем MCP сервер...`);
-console.log(`   Команда: ${cmd} ${cmdArgs.join(" ")}\n`);
+console.log(`   Команда: ${cmd} ${cmdArgs.join(" ")}`);
+if (Object.keys(extraEnv).length > 0) {
+  console.log(`   Env:     ${Object.entries(extraEnv).map(([k, v]) => `${k}=${v}`).join(", ")}`);
+}
+console.log();
 
 // ─── Запускаем сервер как дочерний процесс ───────────────────────────────────
 
 const server = spawn(cmd, cmdArgs, {
   stdio: ["pipe", "pipe", "pipe"],
+  env: { ...process.env, ...extraEnv }, // текущий env + переданные переменные
 });
 
 server.on("error", (err) => {
@@ -192,7 +221,7 @@ function printHelp() {
 
   tools                        — список инструментов с примерами вызова
   tools --schema               — то же, но с полной JSON Schema
-  call <tool> <json>           — вызвать инструмент
+  call <tool> [json-аргументы] — вызвать инструмент
   raw <method> [json-params]   — сырой JSON-RPC запрос
   resources                    — список ресурсов (если сервер поддерживает)
   prompts                      — список промптов (если сервер поддерживает)
@@ -233,7 +262,7 @@ function startRepl() {
 
         case "call": {
           const toolName = rest[0];
-          if (!toolName) { console.log("Укажи имя инструмента: call <tool> <json>"); break; }
+          if (!toolName) { console.log("Укажи имя инструмента: call <tool> [json]"); break; }
           const jsonStr = rest.slice(1).join(" ");
           const toolArgs = jsonStr ? JSON.parse(jsonStr) : {};
           await callTool(toolName, toolArgs);
