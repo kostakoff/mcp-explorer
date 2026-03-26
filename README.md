@@ -1,61 +1,94 @@
 # MCP Explorer
 
-Интерактивный клиент для ручного общения с MCP filesystem сервером.
-Показывает что реально происходит между агентом и MCP сервером.
+Интерактивный клиент для ручного общения с любым MCP сервером через stdin/stdout.
+Позволяет пощупать протокол руками — то же самое что делает AI агент, только ты сам.
 
 ## Запуск
 
 ```bash
-node client.mjs /tmp
+node client.mjs <команда запуска mcp сервера...>
 ```
 
-Где `/tmp` — папка к которой сервер будет иметь доступ (можно любую).
+Всё что идёт после `client.mjs` — это команда которой запускается сервер.
+
+### Примеры
+
+```bash
+# npm пакет
+node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
+
+# локальный файл
+node client.mjs node ./my-server.mjs
+
+# python
+node client.mjs python my_server.py
+
+# uvx (uv)
+node client.mjs uvx mcp-server-git --repository /tmp/repo
+
+# вообще любой бинарник
+node client.mjs ./my-mcp-server --some-flag
+```
 
 ## Что происходит под капотом
 
-1. Скрипт делает `spawn("npx", [...])` — запускает MCP сервер как дочерний процесс
-2. ОС создаёт анонимный pipe: наш stdin → его stdin, его stdout → наш stdout
-3. Делается handshake: отправляем `initialize` → сервер отвечает своими capabilities
-4. Дальше ты пишешь команды — они превращаются в JSON-RPC и пишутся в pipe
-
-Реальный JSON который летит в сервер выглядит так:
-```json
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"list_directory","arguments":{"path":"/tmp"}}}
 ```
+client.mjs                        MCP сервер (дочерний процесс)
+    │                                        │
+    │── spawn() ──────────────────────────►  │  ОС создаёт анонимный pipe
+    │                                        │
+    │── stdin: {"method":"initialize"} ────► │
+    │◄─ stdout: {"result":{...}}  ──────────  │
+    │                                        │
+    │── stdin: {"method":"tools/list"} ────► │
+    │◄─ stdout: {"result":{"tools":[...]}} ─  │
+    │                                        │
+    │── stdin: {"method":"tools/call"} ────► │
+    │◄─ stdout: {"result":{"content":[...]}}  │
+```
+
+Формат общения — JSON-RPC 2.0, каждое сообщение на отдельной строке.
+
+Агент делает ровно то же самое — только вместо тебя решает модель:
+читает список инструментов из `tools/list` и сама выбирает что и когда вызвать.
 
 ## Команды
 
 | Команда | Что делает |
 |---------|-----------|
 | `tools` | Список всех инструментов сервера |
-| `ls [путь]` | Список файлов в папке |
-| `tree [путь]` | Дерево папки |
-| `cat <путь>` | Прочитать файл |
-| `mkdir <путь>` | Создать папку |
-| `write <путь> <текст>` | Записать файл |
-| `allowed` | Показать разрешённые папки |
-| `call <tool> <json>` | Вызвать инструмент напрямую |
+| `call <tool> [json]` | Вызвать инструмент с аргументами |
 | `raw <method> [json]` | Сырой JSON-RPC запрос |
+| `resources` | Список ресурсов сервера (если поддерживает) |
+| `prompts` | Список промптов сервера (если поддерживает) |
 | `help` | Справка |
+| `exit` / `quit` | Выход |
 
-## Примеры сессии
+## Пример сессии
 
 ```
+✅ Соединение установлено!
+   Сервер: secure-filesystem-server v0.2.0
+   Протокол: 2024-11-05
+
 mcp> tools
 📦 Доступные инструменты:
-  read_text_file — Read complete contents of a file as text
-  list_directory — List directory contents with [FILE] or [DIR] prefixes
+
+  read_text_file    — Read the complete contents of a file...
+  write_file        — Create a new file or completely overwrite...
+  list_directory    — Get a detailed listing of all files...
   ...
 
-mcp> ls /tmp
+mcp> call list_directory {"path":"/tmp"}
+
+[DIR] my-folder
 [FILE] hello.txt
-[DIR]  my-folder
 
-mcp> write /tmp/test.txt привет мир
-mcp> cat /tmp/test.txt
-привет мир
+mcp> call write_file {"path":"/tmp/test.txt","content":"hello world"}
 
-# Сырой JSON-RPC если хочется пощупать протокол руками:
+Successfully wrote to /tmp/test.txt
+
+# Посмотреть сырой JSON-RPC — что реально летит по протоколу:
 mcp> raw tools/list
-mcp> call get_file_info {"path":"/tmp"}
+mcp> raw resources/list
 ```

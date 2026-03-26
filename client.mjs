@@ -1,25 +1,56 @@
 #!/usr/bin/env node
 
 /**
- * MCP Explorer — интерактивный клиент для filesystem MCP сервера
- * Запуск: node client.mjs /путь/к/папке
+ * MCP Explorer — универсальный интерактивный клиент
+ *
+ * Запуск:
+ *   node client.mjs <команда запуска сервера...>
+ *
+ * Примеры:
+ *   node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
+ *   node client.mjs node ./my-server.mjs
+ *   node client.mjs python my_server.py
+ *   node client.mjs uvx mcp-server-git --repository /tmp/repo
  */
 
 import { spawn } from "child_process";
 import * as readline from "readline";
 
-// ─── Запускаем MCP сервер как дочерний процесс ───────────────────────────────
+// ─── Парсим команду из аргументов ────────────────────────────────────────────
 
-const allowedDir = process.argv[2] || "/tmp";
+const args = process.argv.slice(2);
 
-console.log(`\n🚀 Запускаем MCP filesystem сервер...`);
-console.log(`   Разрешённая папка: ${allowedDir}\n`);
+if (args.length === 0) {
+  console.error(`
+Использование:
+  node client.mjs <команда запуска mcp сервера...>
 
-const server = spawn("npx", ["-y", "@modelcontextprotocol/server-filesystem", allowedDir], {
-  stdio: ["pipe", "pipe", "pipe"], // stdin, stdout, stderr — всё через pipe
+Примеры:
+  node client.mjs npx -y @modelcontextprotocol/server-filesystem /tmp
+  node client.mjs node ./my-server.mjs
+  node client.mjs python my_server.py
+  node client.mjs uvx mcp-server-git --repository /tmp/repo
+`);
+  process.exit(1);
+}
+
+const [cmd, ...cmdArgs] = args;
+
+console.log(`\n🚀 Запускаем MCP сервер...`);
+console.log(`   Команда: ${cmd} ${cmdArgs.join(" ")}\n`);
+
+// ─── Запускаем сервер как дочерний процесс ───────────────────────────────────
+
+const server = spawn(cmd, cmdArgs, {
+  stdio: ["pipe", "pipe", "pipe"],
 });
 
-// Ошибки сервера пишем в консоль серым цветом
+server.on("error", (err) => {
+  console.error(`\n❌ Не удалось запустить процесс: ${err.message}`);
+  console.error(`   Проверь что команда существует: ${cmd}`);
+  process.exit(1);
+});
+
 server.stderr.on("data", (data) => {
   process.stdout.write(`\x1b[90m[server stderr] ${data}\x1b[0m`);
 });
@@ -29,25 +60,21 @@ server.on("close", (code) => {
   process.exit(0);
 });
 
-// ─── JSON-RPC общение ────────────────────────────────────────────────────────
+// ─── JSON-RPC ─────────────────────────────────────────────────────────────────
 
 let requestId = 0;
 let buffer = "";
-const pending = new Map(); // id → { resolve, reject }
+const pending = new Map();
 
-// Читаем stdout сервера — там приходят JSON-RPC ответы
 server.stdout.on("data", (chunk) => {
   buffer += chunk.toString();
-
-  // Сервер шлёт каждый JSON на отдельной строке
   const lines = buffer.split("\n");
-  buffer = lines.pop(); // последняя строка может быть неполной
+  buffer = lines.pop();
 
   for (const line of lines) {
     if (!line.trim()) continue;
     try {
-      const msg = JSON.parse(line);
-      handleMessage(msg);
+      handleMessage(JSON.parse(line));
     } catch (e) {
       console.error("Не смог распарсить ответ сервера:", line);
     }
@@ -56,31 +83,20 @@ server.stdout.on("data", (chunk) => {
 
 function handleMessage(msg) {
   if (msg.id !== undefined && pending.has(msg.id)) {
-    // Это ответ на наш запрос
     const { resolve, reject } = pending.get(msg.id);
     pending.delete(msg.id);
-    if (msg.error) {
-      reject(msg.error);
-    } else {
-      resolve(msg.result);
-    }
+    msg.error ? reject(msg.error) : resolve(msg.result);
   } else if (msg.method) {
-    // Это уведомление от сервера (нам пока не нужно)
     console.log(`\x1b[90m[сервер уведомляет]: ${msg.method}\x1b[0m`);
   }
 }
 
-// Отправить JSON-RPC запрос → вернёт Promise с результатом
 function send(method, params = {}) {
   return new Promise((resolve, reject) => {
     const id = ++requestId;
-    const msg = { jsonrpc: "2.0", id, method, params };
+    server.stdin.write(JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n");
     pending.set(id, { resolve, reject });
 
-    const line = JSON.stringify(msg) + "\n";
-    server.stdin.write(line);
-
-    // Таймаут 10 секунд
     setTimeout(() => {
       if (pending.has(id)) {
         pending.delete(id);
@@ -90,7 +106,7 @@ function send(method, params = {}) {
   });
 }
 
-// ─── Инициализация (обязательный handshake по протоколу MCP) ─────────────────
+// ─── Инициализация ────────────────────────────────────────────────────────────
 
 async function initialize() {
   const result = await send("initialize", {
@@ -98,109 +114,59 @@ async function initialize() {
     capabilities: {},
     clientInfo: { name: "mcp-explorer", version: "1.0.0" },
   });
-  // После initialize нужно отправить notification initialized
-  const notif = { jsonrpc: "2.0", method: "notifications/initialized" };
-  server.stdin.write(JSON.stringify(notif) + "\n");
+  server.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
   return result;
 }
 
-// ─── Готовые команды для удобства ────────────────────────────────────────────
+// ─── Команды ─────────────────────────────────────────────────────────────────
 
-const commands = {
-  // Показать список всех инструментов сервера
-  async tools() {
-    const result = await send("tools/list");
-    console.log("\n📦 Доступные инструменты:\n");
-    for (const tool of result.tools) {
-      console.log(`  \x1b[32m${tool.name}\x1b[0m — ${tool.description}`);
+async function listTools() {
+  const result = await send("tools/list");
+  console.log("\n📦 Доступные инструменты:\n");
+  for (const tool of result.tools) {
+    console.log(`  \x1b[32m${tool.name}\x1b[0m`);
+    const desc = tool.description?.split("\n")[0] || "";
+    if (desc) console.log(`    ${desc}`);
+  }
+  console.log();
+  return result.tools;
+}
+
+async function callTool(toolName, toolArgs) {
+  const result = await send("tools/call", { name: toolName, arguments: toolArgs });
+  for (const block of result.content) {
+    if (block.type === "text") {
+      console.log("\n" + block.text + "\n");
+    } else {
+      console.log(`\n[block type: ${block.type}]\n`, JSON.stringify(block, null, 2), "\n");
     }
-    console.log();
-  },
+  }
+}
 
-  // Вызвать любой инструмент
-  async call(toolName, toolArgs) {
-    const result = await send("tools/call", {
-      name: toolName,
-      arguments: toolArgs,
-    });
-    // Результат — массив content блоков
-    for (const block of result.content) {
-      if (block.type === "text") {
-        console.log("\n" + block.text + "\n");
-      } else {
-        console.log("\n[block типа:", block.type, "]\n", block);
-      }
-    }
-  },
+function printHelp() {
+  console.log(`
+\x1b[33mКоманды:\x1b[0m
 
-  // Список файлов в папке
-  async ls(path) {
-    await commands.call("list_directory", { path: path || allowedDir });
-  },
-
-  // Прочитать файл
-  async cat(path) {
-    await commands.call("read_text_file", { path });
-  },
-
-  // Создать папку
-  async mkdir(path) {
-    await commands.call("create_directory", { path });
-  },
-
-  // Записать файл
-  async write(path, content) {
-    await commands.call("write_file", { path, content });
-  },
-
-  // Дерево папки
-  async tree(path) {
-    await commands.call("directory_tree", { path: path || allowedDir });
-  },
-
-  // Показать разрешённые папки
-  async allowed() {
-    await commands.call("list_allowed_directories", {});
-  },
-
-  // Отправить сырой JSON-RPC (для экспериментов)
-  async raw(method, paramsJson) {
-    const params = paramsJson ? JSON.parse(paramsJson) : {};
-    const result = await send(method, params);
-    console.log("\n" + JSON.stringify(result, null, 2) + "\n");
-  },
-
-  help() {
-    console.log(`
-\x1b[33mДоступные команды:\x1b[0m
-
-  tools                          — список всех инструментов сервера
-  ls [путь]                      — список файлов в папке
-  tree [путь]                    — дерево папки
-  cat <путь>                     — прочитать файл
-  mkdir <путь>                   — создать папку
-  write <путь> <содержимое>      — записать файл
-  allowed                        — показать разрешённые папки
-  call <tool> <json-аргументы>   — вызвать инструмент напрямую
-  raw <method> [json-params]     — сырой JSON-RPC запрос
-
-  exit / quit                    — выход
+  tools                        — список всех инструментов сервера
+  call <tool> [json-аргументы] — вызвать инструмент
+  raw <method> [json-params]   — сырой JSON-RPC запрос
+  resources                    — список ресурсов (если сервер поддерживает)
+  prompts                      — список промптов (если сервер поддерживает)
+  help                         — эта справка
+  exit / quit                  — выход
 
 \x1b[90mПримеры:\x1b[0m
-  ls
-  ls /tmp
-  cat /tmp/test.txt
-  mkdir /tmp/new-folder
-  write /tmp/hello.txt привет мир
-  call get_file_info {"path":"/tmp"}
+  tools
+  call list_directory {"path":"/tmp"}
+  call write_file {"path":"/tmp/x.txt","content":"hello"}
   raw tools/list
+  raw resources/list
 `);
-  },
-};
+}
 
-// ─── REPL — читаем команды от пользователя ───────────────────────────────────
+// ─── REPL ────────────────────────────────────────────────────────────────────
 
-async function startRepl() {
+function startRepl() {
   const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout,
@@ -211,56 +177,66 @@ async function startRepl() {
 
   rl.on("line", async (line) => {
     const trimmed = line.trim();
-    if (!trimmed) {
-      rl.prompt();
-      return;
-    }
+    if (!trimmed) { rl.prompt(); return; }
 
     if (trimmed === "exit" || trimmed === "quit") {
       server.kill();
       process.exit(0);
     }
 
-    // Разбираем строку: первое слово — команда, остальное — аргументы
     const [cmd, ...rest] = trimmed.split(" ");
 
     try {
-      if (cmd === "tools") {
-        await commands.tools();
-      } else if (cmd === "ls") {
-        await commands.ls(rest[0]);
-      } else if (cmd === "cat") {
-        await commands.cat(rest.join(" "));
-      } else if (cmd === "mkdir") {
-        await commands.mkdir(rest.join(" "));
-      } else if (cmd === "write") {
-        await commands.write(rest[0], rest.slice(1).join(" "));
-      } else if (cmd === "tree") {
-        await commands.tree(rest[0]);
-      } else if (cmd === "allowed") {
-        await commands.allowed();
-      } else if (cmd === "call") {
-        const toolName = rest[0];
-        const toolArgs = rest[1] ? JSON.parse(rest.slice(1).join(" ")) : {};
-        await commands.call(toolName, toolArgs);
-      } else if (cmd === "raw") {
-        await commands.raw(rest[0], rest.slice(1).join(" "));
-      } else if (cmd === "help") {
-        commands.help();
-      } else {
-        console.log(`Неизвестная команда: ${cmd}. Напиши help для справки.`);
+      switch (cmd) {
+        case "tools":
+          await listTools();
+          break;
+
+        case "call": {
+          const toolName = rest[0];
+          if (!toolName) { console.log("Укажи имя инструмента: call <tool> [json]"); break; }
+          const jsonStr = rest.slice(1).join(" ");
+          const toolArgs = jsonStr ? JSON.parse(jsonStr) : {};
+          await callTool(toolName, toolArgs);
+          break;
+        }
+
+        case "raw": {
+          const method = rest[0];
+          if (!method) { console.log("Укажи метод: raw <method> [json-params]"); break; }
+          const params = rest[1] ? JSON.parse(rest.slice(1).join(" ")) : {};
+          const result = await send(method, params);
+          console.log("\n" + JSON.stringify(result, null, 2) + "\n");
+          break;
+        }
+
+        case "resources": {
+          const result = await send("resources/list");
+          console.log("\n" + JSON.stringify(result, null, 2) + "\n");
+          break;
+        }
+
+        case "prompts": {
+          const result = await send("prompts/list");
+          console.log("\n" + JSON.stringify(result, null, 2) + "\n");
+          break;
+        }
+
+        case "help":
+          printHelp();
+          break;
+
+        default:
+          console.log(`Неизвестная команда: ${cmd}. Напиши help.`);
       }
     } catch (err) {
-      console.error("\x1b[31mОшибка:\x1b[0m", err.message || err);
+      console.error("\x1b[31mОшибка:\x1b[0m", err.message || JSON.stringify(err));
     }
 
     rl.prompt();
   });
 
-  rl.on("close", () => {
-    server.kill();
-    process.exit(0);
-  });
+  rl.on("close", () => { server.kill(); process.exit(0); });
 }
 
 // ─── Старт ───────────────────────────────────────────────────────────────────
@@ -270,9 +246,13 @@ try {
   console.log(`✅ Соединение установлено!`);
   console.log(`   Сервер: ${info.serverInfo?.name} v${info.serverInfo?.version}`);
   console.log(`   Протокол: ${info.protocolVersion}`);
-  console.log(`\nНапиши \x1b[33mhelp\x1b[0m для списка команд, \x1b[33mtools\x1b[0m чтобы увидеть что умеет сервер.\n`);
+
+  const tools = await listTools();
+  console.log(`   Всего инструментов: ${tools.length}`);
+  console.log(`\nНапиши \x1b[33mhelp\x1b[0m для справки.\n`);
+
   startRepl();
 } catch (err) {
-  console.error("Не удалось подключиться к серверу:", err);
+  console.error("Не удалось подключиться к серверу:", err.message || err);
   process.exit(1);
 }
