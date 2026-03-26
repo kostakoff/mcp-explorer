@@ -118,17 +118,60 @@ async function initialize() {
   return result;
 }
 
+// ─── Форматирование схемы аргументов ─────────────────────────────────────────
+
+// Превращает inputSchema в читаемый пример JSON для вызова
+function schemaToExample(schema) {
+  if (!schema?.properties) return "{}";
+
+  const required = schema.required || [];
+  const obj = {};
+
+  for (const [key, val] of Object.entries(schema.properties)) {
+    const isRequired = required.includes(key);
+    const type = val.type || "any";
+    const placeholder =
+      type === "string"  ? `"<${key}>"` :
+      type === "number"  ? 0 :
+      type === "boolean" ? false :
+      type === "array"   ? "[]" :
+      type === "object"  ? "{}" : `"<${key}>"`;
+
+    obj[key] = `__${isRequired ? "REQ" : "OPT"}:${type}:${placeholder}__`;
+  }
+
+  // Сериализуем и делаем читаемым
+  let example = JSON.stringify(obj, null, 2);
+
+  // Заменяем плейсхолдеры на читаемые значения
+  example = example.replace(/"__REQ:(\w+):(.+?)__"/g, (_, type, val) => val);
+  example = example.replace(/"__OPT:(\w+):(.+?)__"/g, (_, type, val) => `${val} /*optional*/`);
+
+  return example;
+}
+
 // ─── Команды ─────────────────────────────────────────────────────────────────
 
-async function listTools() {
+async function listTools(verbose = false) {
   const result = await send("tools/list");
   console.log("\n📦 Доступные инструменты:\n");
   for (const tool of result.tools) {
     console.log(`  \x1b[32m${tool.name}\x1b[0m`);
     const desc = tool.description?.split("\n")[0] || "";
-    if (desc) console.log(`    ${desc}`);
+    if (desc) console.log(`  \x1b[90m${desc}\x1b[0m`);
+
+    if (verbose) {
+      // Показываем полную схему
+      console.log(`  Схема аргументов:`);
+      console.log(JSON.stringify(tool.inputSchema, null, 2).split("\n").map(l => "    " + l).join("\n"));
+    } else {
+      // Показываем пример вызова
+      const example = schemaToExample(tool.inputSchema);
+      const oneLiner = example.replace(/\n\s*/g, " ");
+      console.log(`  \x1b[33mcall ${tool.name}\x1b[0m \x1b[90m${oneLiner}\x1b[0m`);
+    }
+    console.log();
   }
-  console.log();
   return result.tools;
 }
 
@@ -147,20 +190,16 @@ function printHelp() {
   console.log(`
 \x1b[33mКоманды:\x1b[0m
 
-  tools                        — список всех инструментов сервера
-  call <tool> [json-аргументы] — вызвать инструмент
+  tools                        — список инструментов с примерами вызова
+  tools --schema               — то же, но с полной JSON Schema
+  call <tool> <json>           — вызвать инструмент
   raw <method> [json-params]   — сырой JSON-RPC запрос
   resources                    — список ресурсов (если сервер поддерживает)
   prompts                      — список промптов (если сервер поддерживает)
   help                         — эта справка
   exit / quit                  — выход
 
-\x1b[90mПримеры:\x1b[0m
-  tools
-  call list_directory {"path":"/tmp"}
-  call write_file {"path":"/tmp/x.txt","content":"hello"}
-  raw tools/list
-  raw resources/list
+\x1b[90mПодсказка: команда tools показывает готовые примеры вызовов — копируй и меняй значения\x1b[0m
 `);
 }
 
@@ -189,12 +228,12 @@ function startRepl() {
     try {
       switch (cmd) {
         case "tools":
-          await listTools();
+          await listTools(rest[0] === "--schema");
           break;
 
         case "call": {
           const toolName = rest[0];
-          if (!toolName) { console.log("Укажи имя инструмента: call <tool> [json]"); break; }
+          if (!toolName) { console.log("Укажи имя инструмента: call <tool> <json>"); break; }
           const jsonStr = rest.slice(1).join(" ");
           const toolArgs = jsonStr ? JSON.parse(jsonStr) : {};
           await callTool(toolName, toolArgs);
